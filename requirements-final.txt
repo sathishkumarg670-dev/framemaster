@@ -1,0 +1,12 @@
+# Existing project dependencies remain required.
+fastapi
+uvicorn
+python-multipart
+reportlab
+opencv-python
+numpy
+torch
+torchvision
+ultralytics
+torchreid
+pyserial

@@ -1,0 +1,5 @@
+{
+  "version": 1,
+  "transitions": [],
+  "notes": "Add measured source/target camera transition windows when cameras are spatially/time synchronized."
+}
