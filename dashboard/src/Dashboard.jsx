@@ -2,10 +2,26 @@ import { useEffect, useMemo, useState } from "react";
 
 const API = "http://127.0.0.1:8000";
 
-const COLORS = [
-  "", "black", "white", "gray", "red", "green", "blue",
-  "yellow", "orange", "brown", "purple", "pink",
-];
+// Filter options come from attribute values actually found in processed
+// videos (/attributes/summary), most common first.
+function attributeOptions(counts, current) {
+  const options = Object.entries(counts || {}).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  if (current && !options.some(([value]) => value === current)) options.push([current, 0]);
+  return options;
+}
+
+function AttributeSelect({ label, value, onChange, counts }) {
+  const options = attributeOptions(counts, value);
+  return (
+    <div>
+      <label>{label}</label>
+      <select value={value} onChange={(e) => onChange(e.target.value)} disabled={options.length === 0}>
+        <option value="">{options.length === 0 ? "Not detected in processed videos" : "Any"}</option>
+        {options.map(([option, count]) => <option key={option} value={option}>{`${option} (${count})`}</option>)}
+      </select>
+    </div>
+  );
+}
 
 function formatSeconds(value) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return "—";
@@ -51,6 +67,17 @@ function Dashboard() {
   const [busy, setBusy] = useState(false);
   const [reporting, setReporting] = useState(false);
 
+  const [attrSummary, setAttrSummary] = useState(null);
+
+  const [recorders, setRecorders] = useState([]);
+  const [streamUrl, setStreamUrl] = useState("");
+  const [serialPort, setSerialPort] = useState("COM9");
+  const [nodeId, setNodeId] = useState("");
+  const [segmentSeconds, setSegmentSeconds] = useState(60);
+  const [autoProcess, setAutoProcess] = useState(true);
+  const [processStatic, setProcessStatic] = useState(false);
+  const [esp32Busy, setEsp32Busy] = useState(false);
+
   async function getJson(path, options) {
     const response = await fetch(`${API}${path}`, options);
     if (!response.ok) {
@@ -62,16 +89,20 @@ function Dashboard() {
 
   async function refresh() {
     try {
-      const [h, v, c, j] = await Promise.all([
+      const [h, v, c, j, e, a] = await Promise.all([
         getJson("/health"),
         getJson("/videos"),
         getJson("/candidates?limit=50"),
         getJson("/jobs"),
+        getJson("/esp32/status"),
+        getJson("/attributes/summary"),
       ]);
       setHealth(h);
+      setAttrSummary(a);
       setVideos(v.videos || []);
       setCrossCamera(c.candidates || []);
       setJobs(j.jobs || []);
+      setRecorders(e.recorders || []);
     } catch (error) {
       setMessage(`Backend connection failed: ${error.message}`);
     }
@@ -84,8 +115,16 @@ function Dashboard() {
         const j = await getJson("/jobs");
         setJobs(j.jobs || []);
         if ((j.jobs || []).some((job) => ["completed", "failed"].includes(job.status))) {
-          const h = await getJson("/health");
+          const [h, a] = await Promise.all([getJson("/health"), getJson("/attributes/summary")]);
           setHealth(h);
+          setAttrSummary(a);
+        }
+        const e = await getJson("/esp32/status");
+        setRecorders(e.recorders || []);
+        // New ESP32 segments land in the video database while recording.
+        if ((e.recorders || []).some((r) => r.running)) {
+          const v = await getJson("/videos");
+          setVideos(v.videos || []);
         }
       } catch {
         // Keep the dashboard usable if the backend is temporarily unavailable.
@@ -105,6 +144,13 @@ function Dashboard() {
     });
     return [...values].sort();
   }, [health, videos]);
+
+  // Attribute values present in the processed videos of the selected camera.
+  const foundAttributes = useMemo(() => {
+    if (!attrSummary) return {};
+    if (camera) return attrSummary.by_camera?.[camera]?.attributes || {};
+    return attrSummary.attributes || {};
+  }, [attrSummary, camera]);
 
   async function investigate() {
     setBusy(true);
@@ -132,10 +178,13 @@ function Dashboard() {
         body: JSON.stringify(body),
       });
       setSearchResults(data.candidates || []);
+      const noFilter = targetType === "person" && !upper && !lower && !backpack && !headwear;
       setMessage(
         data.status === "object_index_not_ready"
           ? data.message
-          : `${data.candidate_count || 0} candidate records returned.`
+          : noFilter
+            ? `${data.candidate_count || 0} people found in processed videos. Choose attributes to narrow the search.`
+            : `${data.candidate_count || 0} candidate records returned.`
       );
     } catch (error) {
       setMessage(`Investigation search failed: ${error.message}`);
@@ -154,6 +203,45 @@ function Dashboard() {
       await refresh();
     } catch (error) {
       setMessage(`Processing failed: ${error.message}`);
+    }
+  }
+
+  async function startRecording() {
+    setEsp32Busy(true);
+    setMessage(streamUrl ? "Connecting to ESP32-CAM..." : `Reading ESP32-CAM address from ${serialPort}...`);
+    try {
+      const data = await getJson("/esp32/record/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          stream_url: streamUrl || null,
+          serial_port: streamUrl ? null : serialPort,
+          node_id: nodeId || null,
+          segment_seconds: Number(segmentSeconds),
+          auto_process: autoProcess,
+          process_static_segments: processStatic,
+        }),
+      });
+      setStreamUrl(data.stream_url);
+      setMessage(`Recording ${data.node_id} from ${data.stream_url}.`);
+      await refresh();
+    } catch (error) {
+      setMessage(`ESP32 recording failed: ${error.message}`);
+    } finally {
+      setEsp32Busy(false);
+    }
+  }
+
+  async function stopRecording(id) {
+    setEsp32Busy(true);
+    try {
+      await getJson(`/esp32/record/${encodeURIComponent(id)}/stop`, { method: "POST" });
+      setMessage(`Stopped ${id}. The last partial segment was stored.`);
+      await refresh();
+    } catch (error) {
+      setMessage(`Stop failed: ${error.message}`);
+    } finally {
+      setEsp32Busy(false);
     }
   }
 
@@ -380,6 +468,47 @@ function Dashboard() {
 
           <section className="card wide">
             <div className="section-head">
+              <div><h2>ESP32-CAM Recorder</h2><div className="muted">Store the camera stream as video segments, then process each stored segment.</div></div>
+            </div>
+            <div className="filters">
+              <div><label>Stream URL</label><input value={streamUrl} onChange={(e) => setStreamUrl(e.target.value)} placeholder="http://192.168.1.50/stream" /></div>
+              <div><label>Serial Port (if no URL)</label><input value={serialPort} onChange={(e) => setSerialPort(e.target.value)} placeholder="COM9" /></div>
+              <div><label>Node ID</label><input value={nodeId} onChange={(e) => setNodeId(e.target.value)} placeholder="from firmware" /></div>
+              <div><label>Segment Seconds</label><input type="number" min="5" max="600" value={segmentSeconds} onChange={(e) => setSegmentSeconds(e.target.value)} /></div>
+              <div><label>Auto Process</label><select value={autoProcess ? "yes" : "no"} onChange={(e) => setAutoProcess(e.target.value === "yes")}><option value="yes">After storing</option><option value="no">Store only</option></select></div>
+              <div><label>Segments Without Motion</label><select value={processStatic ? "yes" : "no"} onChange={(e) => setProcessStatic(e.target.value === "yes")}><option value="no">Store, skip processing</option><option value="yes">Process too</option></select></div>
+            </div>
+            <div className="actions">
+              <button className="primary" disabled={esp32Busy} onClick={startRecording}>{esp32Busy ? "Working..." : "Start Recording"}</button>
+            </div>
+            <div className="video-list" style={{ marginTop:14 }}>
+              {recorders.length === 0 ? <div className="empty">No ESP32-CAM recorder started.</div> : recorders.map((r) => (
+                <div key={r.node_id}>
+                  <div className="row">
+                    <div className="row-main">
+                      <div className="row-title">{r.node_id} · {r.stream_url}</div>
+                      <div className="mini">
+                        {r.recent_fps} fps · {r.current_segment_frames} frames in current segment · {r.segments.length} stored
+                        {r.last_error ? ` · ${r.last_error}` : ""}
+                      </div>
+                    </div>
+                    <div className="row-actions">
+                      <strong className={r.state === "recording" ? "job-ok" : r.state === "reconnecting" ? "job-fail" : "job-running"}>{r.state}</strong>
+                      {r.running && <button disabled={esp32Busy} onClick={() => stopRecording(r.node_id)}>Stop</button>}
+                    </div>
+                  </div>
+                  {r.segments.slice(0, 5).map((s) => (
+                    <div className="mini" key={s.filename} style={{ padding:"6px 11px" }}>
+                      {s.filename} · {s.error ? `error: ${s.error}` : `${s.duration_seconds}s @ ${s.fps} fps · ${s.width}x${s.height} · motion ${s.motion_detected ? "yes" : "no"} · ${s.processing?.status}`}
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <section className="card wide">
+            <div className="section-head">
               <div><h2>Investigator Search</h2><div className="muted">Strict attribute retrieval over canonical investigation profiles.</div></div>
             </div>
 
@@ -391,10 +520,10 @@ function Dashboard() {
             <div className="filters">
               {targetType === "person" ? (
                 <>
-                  <div><label>Upper Body</label><select value={upper} onChange={(e) => setUpper(e.target.value)}>{COLORS.map((c) => <option key={c} value={c}>{c || "Any"}</option>)}</select></div>
-                  <div><label>Lower Body</label><select value={lower} onChange={(e) => setLower(e.target.value)}>{COLORS.map((c) => <option key={c} value={c}>{c || "Any"}</option>)}</select></div>
-                  <div><label>Backpack</label><select value={backpack} onChange={(e) => setBackpack(e.target.value)}><option value="">Any</option><option value="yes">Yes</option><option value="no">No</option></select></div>
-                  <div><label>Headwear</label><select value={headwear} onChange={(e) => setHeadwear(e.target.value)}><option value="">Any</option><option value="yes">Yes</option><option value="no">No</option></select></div>
+                  <AttributeSelect label="Upper Body" value={upper} onChange={setUpper} counts={foundAttributes.upper_body_color} />
+                  <AttributeSelect label="Lower Body" value={lower} onChange={setLower} counts={foundAttributes.lower_body_color} />
+                  <AttributeSelect label="Backpack" value={backpack} onChange={setBackpack} counts={foundAttributes.backpack} />
+                  <AttributeSelect label="Headwear" value={headwear} onChange={setHeadwear} counts={foundAttributes.headwear} />
                   <div><label>Camera</label><select value={camera} onChange={(e) => setCamera(e.target.value)}><option value="">All cameras</option>{cameraOptions.map((c) => <option key={c} value={c}>{c}</option>)}</select></div>
                 </>
               ) : (
@@ -430,7 +559,7 @@ function Dashboard() {
                     <div className="row-main">
                       <div className="result-top">
                         <strong>{item.camera_id || item.video_id || "Object index"}</strong>
-                        <span className="score">{isObject ? (item.similarity == null ? "Indexed" : percent(item.similarity)) : percent(item.attribute_score)}</span>
+                        <span className="score">{isObject ? (item.similarity == null ? "Indexed" : percent(item.similarity)) : item.attribute_score == null ? "Found" : percent(item.attribute_score)}</span>
                       </div>
                       <div className="result-meta">
                         {item.track_id != null && <CameraBadge camera={`TRACK ${item.track_id}`} />}

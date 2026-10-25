@@ -22,6 +22,7 @@ The project combines video processing, object detection, tracking, person re-ide
 - [Prerequisites](#-prerequisites)
 - [Installation](#-installation)
 - [Running the Application](#-running-the-application)
+- [ESP32-CAM Recording](#-esp32-cam-recording)
 - [Manual Video Processing](#-manual-video-processing)
 - [Investigation V1](#-investigation-v1)
 - [Testing](#-testing)
@@ -237,6 +238,30 @@ Open the local address printed by Vite, commonly:
 `http://localhost:5173/`
 
 The frontend and backend must both be running for the complete interface to work. Confirm that the frontend's API configuration points to the correct backend address.
+
+## 📷 ESP32-CAM Recording
+
+Hardware: AI-Thinker ESP32-CAM on an ESP32-CAM-MB USB shield. The board only captures and streams JPEG frames over Wi-Fi; recording, YOLO tracking and Re-ID run on the PC.
+
+1. Flash `hardware/esp32cam_stream_v2/esp32cam_stream_v2.ino` (board "AI Thinker ESP32-CAM", PSRAM enabled) after entering your Wi-Fi name and password. Never commit real credentials. The older `esp32cam_stream_v1` sketch also works.
+2. Check the boot log, if needed: `python hardware/esp32_serial_monitor_v1.py --port COM9`.
+3. In the dashboard's **ESP32-CAM Recorder** panel, enter the stream URL (`http://<board-ip>/stream`) or just the serial port (`COM9`) to read the IP from the board, then click **Start Recording**.
+
+Equivalent command line:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.esp32_recorder --port COM9 --segment-seconds 60
+```
+
+How stored video is handled:
+
+- The stream is saved as `data/videos/esp32_<node>_<YYYYMMDD_HHMMSS>.mp4` segments, at the measured camera fps so pipeline timestamps match real time. Segments are written to `data/videos/.recording/` first and moved into place only when complete.
+- Each stored segment with motion is queued for processing (tracking, crops, attributes, Re-ID). Segments without motion are stored but not processed automatically; process them from the video list if needed.
+- Jobs run one at a time, each in its own process, so a processing crash cannot stop the API or an active recording.
+- The board serves one stream client at a time: while recording, close any browser tab showing the stream.
+- A segment log is appended to `data/esp32/segments.jsonl`.
+
+API: `GET /esp32/discover?port=COM9`, `POST /esp32/record/start`, `POST /esp32/record/{node_id}/stop`, `GET /esp32/status`.
 
 ## 🎞️ Manual Video Processing
 

@@ -48,7 +48,11 @@ def run_single_pass_tracking(
 
     start_time = time.time()
 
-    # Track with persist=True for temporal consistency
+    frame_stride = max(1, int(frame_stride))
+
+    # Track with persist=True for temporal consistency.
+    # vid_stride makes the loader skip frames before inference, so a stride
+    # of N cuts YOLO work by N instead of only discarding results.
     results = model.track(
         source=str(video_path),
         tracker="botsort.yaml",
@@ -58,22 +62,22 @@ def run_single_pass_tracking(
         stream=True,
         persist=True,
         verbose=False,
+        vid_stride=frame_stride,
     )
 
     observations = []
     unique_tracks = set()
     frame_count = 0
 
-    for result in results:
-        frame_count += 1
+    for result_index, result in enumerate(results):
+        # Original video frame index, so crop extraction can seek correctly.
+        frame_index = result_index * frame_stride
 
-        if frame_stride > 1 and (frame_count - 1) % frame_stride != 0:
-            continue
-
-        if max_frames and frame_count > max_frames:
+        if max_frames and frame_index >= max_frames:
             break
 
-        timestamp = (frame_count - 1) / fps
+        frame_count = frame_index + 1
+        timestamp = frame_index / fps
 
         if result.boxes is not None and result.boxes.id is not None:
             boxes = result.boxes.xyxy.cpu().tolist()
@@ -85,7 +89,7 @@ def run_single_pass_tracking(
                 unique_tracks.add(t_id)
 
                 obs = Observation(
-                    frame_index=frame_count - 1,
+                    frame_index=frame_index,
                     timestamp_seconds=round(timestamp, 3),
                     track_id=t_id,
                     bbox=[int(b) for b in box],
@@ -94,7 +98,7 @@ def run_single_pass_tracking(
                 )
                 observations.append(obs)
 
-        if frame_count % log_interval == 0:
+        if (result_index + 1) % log_interval == 0:
             print(f"Tracking frame {frame_count}/{total_frames} | Unique tracks: {len(unique_tracks)} | Observations: {len(observations)}")
 
     elapsed = time.time() - start_time

@@ -10,3 +10,9 @@ torchvision
 ultralytics
 torchreid
 pyserial
+# BoT-SORT tracking needs `lap`; lapx provides it with prebuilt wheels and stops
+# ultralytics from pip-installing it at runtime inside the API server.
+lapx
+# torchreid imports these at module load but does not declare them.
+gdown
+tensorboard
