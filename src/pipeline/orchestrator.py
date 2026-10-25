@@ -144,6 +144,34 @@ def print_dataset():
     print()
 
 
+def middle_crop_per_track(crop_metadata):
+    """
+    Representative crop per track when Re-ID is skipped.
+
+    Same choice as the Re-ID stage: the middle crop of the track.
+    """
+
+    crops_by_track = {}
+
+    for crop in crop_metadata.crops:
+        crops_by_track.setdefault(
+            crop.track_id,
+            [],
+        ).append(crop)
+
+    representative_crops = {}
+
+    for track_id, crops in crops_by_track.items():
+        crops.sort(
+            key=lambda item: item.frame_index
+        )
+        representative_crops[track_id] = (
+            crops[len(crops) // 2].crop_path
+        )
+
+    return representative_crops
+
+
 def build_canonical_profiles(
     video_id,
     tracking_result,
@@ -499,51 +527,70 @@ def process_video(
         )
 
         if not checkpoint.exists():
-            raise FileNotFoundError(
-                "Market1501 checkpoint not found:\n"
-                f"{checkpoint}"
+
+            # Without the checkpoint, still save TRACK_ONLY profiles so the
+            # video's people and their attributes reach investigator search.
+            print(
+                "Re-ID checkpoint not found, skipping embeddings:\n"
+                f"  {checkpoint}"
             )
 
-        reid_json = (
-            reid_dir
-            / "market1501_track_embeddings.json"
-        )
+            embeddings = {}
 
-        reid_start = time.time()
-
-        embeddings, representative_crops = (
-            generate_track_embeddings(
-                crop_metadata=crop_metadata,
-                checkpoint_path=checkpoint,
-                output_json=reid_json,
-                device=device,
-                batch_size=16,
+            representative_crops = middle_crop_per_track(
+                crop_metadata
             )
-        )
 
-        reid_seconds = (
-            time.time() - reid_start
-        )
+            summary["stages"]["reid"] = {
+                "status": "skipped",
+                "reason": (
+                    "checkpoint not found: "
+                    f"{checkpoint}"
+                ),
+            }
 
-        summary["stages"]["reid"] = {
-            "status": "completed",
-            "seconds": round(
-                reid_seconds,
-                2,
-            ),
-            "track_count": len(
-                embeddings
-            ),
-            "embedding_dimension": 512,
-        }
+        else:
 
-        print()
-        print("Re-ID extraction complete:")
-        print(
-            f"  Track embeddings: "
-            f"{len(embeddings)}"
-        )
-        print()
+            reid_json = (
+                reid_dir
+                / "market1501_track_embeddings.json"
+            )
+
+            reid_start = time.time()
+
+            embeddings, representative_crops = (
+                generate_track_embeddings(
+                    crop_metadata=crop_metadata,
+                    checkpoint_path=checkpoint,
+                    output_json=reid_json,
+                    device=device,
+                    batch_size=16,
+                )
+            )
+
+            reid_seconds = (
+                time.time() - reid_start
+            )
+
+            summary["stages"]["reid"] = {
+                "status": "completed",
+                "seconds": round(
+                    reid_seconds,
+                    2,
+                ),
+                "track_count": len(
+                    embeddings
+                ),
+                "embedding_dimension": 512,
+            }
+
+            print()
+            print("Re-ID extraction complete:")
+            print(
+                f"  Track embeddings: "
+                f"{len(embeddings)}"
+            )
+            print()
 
         # ========================================================
         # M11.5 CANONICAL PROFILES

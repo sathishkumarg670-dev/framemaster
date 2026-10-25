@@ -1144,12 +1144,15 @@ def search_by_attributes(
                 if headwear_match:
                     matches += 1
 
-            if compared == 0:
-                continue
-
-            attribute_score = round(
-                matches / compared,
-                6
+            # No attribute requested: browse every profile that has
+            # attributes, without claiming a match score.
+            attribute_score = (
+                round(
+                    matches / compared,
+                    6
+                )
+                if compared
+                else None
             )
 
             # ------------------------------------------------
@@ -1237,7 +1240,7 @@ def search_by_attributes(
                     compared,
 
                 "match_mode":
-                    "strict",
+                    "strict" if compared else "browse",
 
                 # --------------------------------------------
                 # Timeline
@@ -1273,13 +1276,99 @@ def search_by_attributes(
 
     results.sort(
         key=lambda item: (
-            item["attribute_score"],
-            item["matched_attributes"]
-        ),
-        reverse=True
+            -(item["attribute_score"] or 0),
+            -item["matched_attributes"],
+            item["camera_id"],
+            item["first_seen_sec"],
+        )
     )
 
     return results
+
+
+# ============================================================
+# ATTRIBUTE SUMMARY
+# ============================================================
+
+SUMMARY_ATTRIBUTES = (
+    "upper_body_color",
+    "lower_body_color",
+    "backpack",
+    "headwear",
+)
+
+
+def attribute_summary(
+    profiles_by_camera: Dict[
+        str,
+        List[TrackProfile]
+    ],
+) -> dict:
+    """
+    Count the attribute values actually present in processed
+    profiles, overall and per camera/video.
+
+    An attribute with no values is not produced by the current
+    pipeline, so the investigator should not filter on it.
+    """
+
+    def empty():
+        return {
+            name: {}
+            for name in SUMMARY_ATTRIBUTES
+        }
+
+    overall = empty()
+    by_camera = {}
+
+    for camera_id, profiles in profiles_by_camera.items():
+
+        camera_counts = empty()
+        profile_count = 0
+
+        for profile in profiles:
+
+            if profile.attributes is None:
+                continue
+
+            profile_count += 1
+
+            for name in SUMMARY_ATTRIBUTES:
+
+                value = safe_attribute_value(
+                    profile.attributes,
+                    name
+                )
+
+                if value is None or str(value).strip() == "":
+                    continue
+
+                value = str(value).strip().lower()
+
+                for counts in (
+                    camera_counts[name],
+                    overall[name],
+                ):
+                    counts[value] = counts.get(value, 0) + 1
+
+        by_camera[camera_id] = {
+            "profiles_with_attributes": profile_count,
+            "attributes": camera_counts,
+        }
+
+    return {
+        "profiles_with_attributes": sum(
+            item["profiles_with_attributes"]
+            for item in by_camera.values()
+        ),
+        "attributes": overall,
+        "available_attributes": [
+            name
+            for name in SUMMARY_ATTRIBUTES
+            if overall[name]
+        ],
+        "by_camera": by_camera,
+    }
 
 # ============================================================
 # SEARCH BY CAMERA

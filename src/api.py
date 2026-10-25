@@ -16,6 +16,7 @@ from reportlab.lib import colors
 from reportlab.lib.utils import ImageReader
 
 from src.investigation_search import (
+    attribute_summary,
     load_all_profiles,
     search_by_attributes,
     search_by_camera,
@@ -93,6 +94,16 @@ class InvestigationRequest(BaseModel):
     camera_id: Optional[str] = None
 
     limit: int = 20
+
+
+class Esp32RecordRequest(BaseModel):
+    stream_url: Optional[str] = None
+    serial_port: Optional[str] = None
+    node_id: Optional[str] = None
+    segment_seconds: int = 60
+    auto_process: bool = True
+    process_static_segments: bool = False
+    frame_stride: int = 1
 
 
 class ReportRequest(BaseModel):
@@ -317,6 +328,12 @@ def dataset_stats():
     return dataset_statistics(profiles)
 
 
+@app.get("/attributes/summary")
+def attributes_summary():
+    """Attribute values found in processed videos, for investigator filters."""
+    return attribute_summary(load_all_profiles())
+
+
 # ============================================================
 # CANDIDATES
 # ============================================================
@@ -399,7 +416,9 @@ def investigate(request: InvestigationRequest):
         backpack=request.backpack,
         headwear=request.headwear,
         camera_id=request.camera_id,
-        ready_only=True,
+        # Attribute matching does not use Re-ID embeddings, so TRACK_ONLY
+        # profiles (processed without a Re-ID checkpoint) are searchable too.
+        ready_only=False,
     )
 
     limit = max(1, min(request.limit, 500))
@@ -604,6 +623,63 @@ def process_video(
         "filename": path.name,
         "message": "Video processing job started.",
     }
+
+
+# ============================================================
+# ESP32-CAM RECORDING
+# ============================================================
+
+@app.get("/esp32/discover")
+def esp32_discover(port: str = "COM9"):
+    try:
+        from src.hardware_bridge import discover_esp32
+        return discover_esp32(port)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"ESP32 discovery on {port} failed: {exc}")
+
+
+@app.get("/esp32/status")
+def esp32_status():
+    try:
+        from src.esp32_recorder import all_status
+    except Exception as exc:
+        return {"available": False, "error": str(exc), "recorders": []}
+    return {"available": True, "recorders": all_status()}
+
+
+@app.post("/esp32/record/start")
+def esp32_record_start(request: Esp32RecordRequest):
+    from src.esp32_recorder import start_recorder
+
+    stream_url, node_id = request.stream_url, request.node_id
+    if not stream_url:
+        if not request.serial_port:
+            raise HTTPException(status_code=400, detail="Give stream_url or serial_port")
+        found = esp32_discover(request.serial_port)
+        stream_url, node_id = found["stream_url"], node_id or found["node_id"]
+
+    try:
+        recorder = start_recorder(
+            stream_url,
+            node_id or "esp32cam",
+            segment_seconds=request.segment_seconds,
+            auto_process=request.auto_process,
+            process_static_segments=request.process_static_segments,
+            frame_stride=request.frame_stride,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return recorder.status()
+
+
+@app.post("/esp32/record/{node_id}/stop")
+def esp32_record_stop(node_id: str):
+    from src.esp32_recorder import stop_recorder
+
+    recorder = stop_recorder(node_id)
+    if recorder is None:
+        raise HTTPException(status_code=404, detail="Recorder not found")
+    return recorder.status()
 
 
 # ============================================================
